@@ -1,0 +1,475 @@
+service: kin-ad-network
+
+plugins:
+  - serverless-webpack
+
+package:
+  individually: true
+
+provider:
+  name: aws
+  variableSyntax: \${((env|self|opt|file|cf|s3|ssm|deep)[:\(][ ~:a-zA-Z0-9'._,\-\/\(\)]*?)}
+  runtime: nodejs12.x
+  region: eu-central-1
+  logRetentionInDays: 14
+  profile: kinads
+  stage: ${opt:stage, 'dev'}
+  environment:
+    STAGE: ${self:provider.stage}
+    REGION: ${self:provider.region}
+    APPS_TABLE_NAME: ${self:provider.stage}-apps
+    APP_EVENTS_TABLE_NAME: ${self:provider.stage}-app-events
+    EARN_REQUEST_TABLE_NAME: ${self:provider.stage}-app-earn-request
+    CLIENT_TABLE_NAME: ${self:provider.stage}-clients
+    EVENTS_TABLE_NAME: ${self:provider.stage}-events
+    INFO_TABLE_NAME: ${self:provider.stage}-info
+    PAYOUTS_TABLE_NAME: ${self:provider.stage}-payouts
+    SETTINGS_TABLE_NAME: ${self:provider.stage}-settings
+    REPORTING_TABLE_NAME: ${self:provider.stage}-app-reports
+    IRONSOURCE_PRIVATE_KEY: ${self:custom.credentials.IRONSOURCE_PRIVATE_KEY}
+    IRONSOURCE_SECRET_KEY: ${self:custom.credentials.IRONSOURCE_SECRET_KEY}
+    IRONSOURCE_REFRESH_TOKEN: ${self:custom.credentials.IRONSOURCE_REFRESH_TOKEN}
+    KIN_SERVER:  ${self:custom.credentials.KIN_SERVER}
+    KIN_PAYOUT_SECRET:  ${self:custom.credentials.KIN_PAYOUT_SECRET}
+    ADMOB_REFRESH_TOKEN:  ${self:custom.credentials.ADMOB_REFRESH_TOKEN}
+    ADMOB_PUB_ID:  ${self:custom.credentials.ADMOB_PUB_ID}
+    ADMOB_CLIENT_ID:  ${self:custom.credentials.ADMOB_CLIENT_ID}
+    ADMOB_CLIENT_SECRET:  ${self:custom.credentials.ADMOB_CLIENT_SECRET}
+    HOT_WALLET_IP:  ${self:custom.credentials.HOT_WALLET_IP}
+    HOT_WALLET_SECRET:  ${self:custom.credentials.HOT_WALLET_SECRET}
+    ADGEM_SECRET_KEY:  ${self:custom.credentials.ADGEM_SECRET_KEY}
+    COINTIGER_KEY:  ${self:custom.credentials.COINTIGER_KEY}
+    BITHUMB_KEY:  ${self:custom.credentials.BITHUMB_KEY}
+    BITHUMB_SECRET:  ${self:custom.credentials.BITHUMB_SECRET}
+  stackPolicy:
+    - { Effect: Allow, Principal: "*", Action: "Update:*", Resource: "*"}
+    - Effect: Deny
+      Principal: "*"
+      Action: ["Update:Replace", "Update:Delete"]
+      Resource: LogicalResourceId/DynamoDBAppsTable
+    - Effect: Deny
+      Principal: "*"
+      Action: ["Update:Replace", "Update:Delete"]
+      Resource: LogicalResourceId/DynamoDBAppEventsTable
+    - Effect: Deny
+      Principal: "*"
+      Action: ["Update:Replace", "Update:Delete"]
+      Resource: LogicalResourceId/DynamoDBReportsTable
+    - Effect: Deny
+      Principal: "*"
+      Action: ["Update:Replace", "Update:Delete"]
+      Resource: LogicalResourceId/DynamoDBSettingsTable
+  iamRoleStatements:
+    - Effect: "Allow"
+      Action:
+        - "ec2:CreateNetworkInterface"
+        - "ec2:DescribeNetworkInterfaces"
+        - "ec2:DetachNetworkInterface"
+        - "ec2:DeleteNetworkInterface"
+      Resource: "*"
+    - Effect: Allow
+      Action:
+      - dynamodb:Scan
+      - dynamodb:Query
+      - dynamodb:UpdateItem
+      - dynamodb:DeleteItem
+      Resource:
+        - { "Fn::Join" : [ "", [ { "Fn::GetAtt": ["DynamoDBAppEventsTable", "Arn"] }, "*" ] ] }
+        - { "Fn::Join" : [ "", [ { "Fn::GetAtt": ["DynamoDBAppsTable", "Arn"] }, "*" ] ] }
+        - { "Fn::Join" : [ "", [ { "Fn::GetAtt": ["DynamoDBReportsTable", "Arn"] }, "*" ] ] }
+        - { "Fn::Join" : [ "", [ { "Fn::GetAtt": ["DynamoDBEarnRequestTable", "Arn"] }, "*" ] ] }
+        - { "Fn::Join" : [ "", [ { "Fn::GetAtt": ["DynamoDBEarnPayoutTable", "Arn"] }, "*" ] ] }
+        - { "Fn::Join" : [ "", [ { "Fn::GetAtt": ["DynamoDBSettingsTable", "Arn"] }, "*" ] ] }
+
+custom:
+  credentials: ${ssm:/aws/reference/secretsmanager/${self:provider.stage}~true}
+  dev:
+    url: "https://dashboard-dev.kinads.org"
+  staging:
+    url: "https://dashboard-staging.kinads.org"
+  production:
+    url: "https://dashboard.kinads.org"
+  webpack:
+    packager: 'yarn'
+    packagerOptions:
+      scripts:
+        - rm -rf node_modules/grpc/src/node/extension_binary/* # Remove grpc for other systems
+        - rm -rf node_modules/sodium-native
+        - npm rebuild grpc --target=12.0.0 --target_arch=x64 --target_platform=linux --target_libc=glibc
+    includeModules:
+      forceExclude:
+        - aws-sdk
+
+functions:
+  payout:
+    handler: handlers/payout.default
+    timeout: 30
+    events:
+      - http:
+          path: payout
+          method: post
+  hot_wallet_status:
+    handler: handlers/hot_wallet_status.default
+    timeout: 30
+    events:
+      - http:
+          path: hot_wallet_status
+          method: get
+          cors: true
+  reporting:
+    handler: handlers/reporting.reportingTwoDaysAgo
+    timeout: 300
+    events:
+      - schedule: cron(0 10 * * ? *) # Every day at 10:00
+  reportingToday:
+    handler: handlers/reporting.reportingToday
+    timeout: 300
+    events:
+      - schedule: rate(10 minutes)
+  payment:
+    handler: handlers/payment.default
+    timeout: 300
+    events:
+      - schedule: rate(1 day)
+  preSignup:
+    handler: handlers/preSignup.default
+    timeout: 30
+
+resources:
+ Resources:
+  DynamoDBAppsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: ${self:provider.stage}-apps
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: "userId"
+          AttributeType: S
+        # dataIdx is an overloaded index
+        # Data index index is used for identification and reporting:
+        # dataIdx = type#network#id, with type = reporting|callback OR username index, see example
+        # So for example:
+        # userId|dataIdx
+        # A     |reporting#ironSource#appId1
+        # A     |callback#ironSource#appId1
+        # A     |reporting#AdMob#appId1
+        # A     |callback#AdMob#adUnit1
+        # A     |callback#AdMob#adUnit2
+        # A     |callback#AdMob#adUnit3
+        # A     |username#myAppName
+
+        # Examples:
+        # Callback ironSource:                            query dataIdx="callback#ironSource#{appId}"
+        # Callback AdMob:                                 query dataIdx="callback#AdMob#{adUnitId}"
+        # Reporting ironSource:                           query dataIdx="reporting#ironSource#{appId}"
+        # Reporting AdMob:                                query dataIdx="reporting#AdMob#{appId}"
+        # Get all reporting mediation networks from user: query userId={userId} AND begins_with(dataIdx, 'reporting')
+        # Get all AdMob callbacks from user:              query userId={userId} AND begins_with(dataIdx, 'callback#AdMob')
+        # Get userId from username                        query dataIdx="username#{username}"
+        - AttributeName: "dataIdx"
+          AttributeType: S
+      KeySchema:
+        - AttributeName: "userId"
+          KeyType: HASH
+        - AttributeName: "dataIdx"
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: dataIndex
+          KeySchema:
+            - AttributeName: dataIdx
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      BillingMode: PAY_PER_REQUEST
+
+  DynamoDBAppsTablePolicyUser:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: DynamoDBAppsTablePolicyUser-${self:provider.stage}
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - dynamodb:Scan
+              - dynamodb:Query
+            Resource:
+            - { "Fn::Join" : [ "", [ { "Fn::GetAtt": ["DynamoDBAppsTable", "Arn"] }, "*" ] ] }
+            - { "Fn::Join" : [ "", [ { "Fn::GetAtt": ["DynamoDBAppEventsTable", "Arn"] }, "*" ] ] }
+            - { "Fn::Join" : [ "", [ { "Fn::GetAtt": ["DynamoDBReportsTable", "Arn"] }, "*" ] ] }
+            - { "Fn::Join" : [ "", [ { "Fn::GetAtt": ["DynamoDBEarnPayoutTable", "Arn"] }, "*" ] ] }
+            Condition: { "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": [ "${cognito-identity.amazonaws.com:sub}" ] } }
+      Roles:
+        - { "Ref": "UserGroupIdentityRole" }
+
+  DynamoDBAppsTablePolicyAdmin:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: DynamoDBAppsTablePolicyAdmin-${self:provider.stage}
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - dynamodb:Scan
+              - dynamodb:Query
+              - dynamodb:UpdateItem
+              - dynamodb:DeleteItem
+            Resource:
+            - { "Fn::Join" : [ "", [ { "Fn::GetAtt": ["DynamoDBAppsTable", "Arn"] }, "*" ] ] }
+            - { "Fn::Join" : [ "", [ { "Fn::GetAtt": ["DynamoDBAppEventsTable", "Arn"] }, "*" ] ] }
+            - { "Fn::Join" : [ "", [ { "Fn::GetAtt": ["DynamoDBReportsTable", "Arn"] }, "*" ] ] }
+            - { "Fn::Join" : [ "", [ { "Fn::GetAtt": ["DynamoDBEarnPayoutTable", "Arn"] }, "*" ] ] }
+      Roles:
+        - { "Ref": "AdminGroupIdentityRole" }
+
+  DynamoDBAppEventsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: ${self:provider.stage}-app-events
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: "userId"
+          AttributeType: S
+        - AttributeName: "eventId"
+          AttributeType: S
+        - AttributeName: "ipAddress"
+          AttributeType: S
+      KeySchema:
+        - AttributeName: "userId"
+          KeyType: HASH
+        - AttributeName: "eventId"
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: ipIndex
+          KeySchema:
+            - AttributeName: userId
+              KeyType: HASH
+            - AttributeName: ipAddress
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      BillingMode: PAY_PER_REQUEST
+      TimeToLiveSpecification:
+        AttributeName: expires
+        Enabled: true
+
+  DynamoDBEarnRequestTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: ${self:provider.stage}-app-earn-request
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: "appUserId"
+          AttributeType: S
+        - AttributeName: "ipAddress"
+          AttributeType: S
+      KeySchema:
+        - AttributeName: "appUserId"
+          KeyType: HASH
+        - AttributeName: "ipAddress"
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+      TimeToLiveSpecification:
+        AttributeName: expires
+        Enabled: true
+
+  DynamoDBSettingsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: ${self:provider.stage}-settings
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: "name"
+          AttributeType: S
+      KeySchema:
+        - AttributeName: "name"
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      TimeToLiveSpecification:
+        AttributeName: expires
+        Enabled: true
+
+  DynamoDBEarnPayoutTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: ${self:provider.stage}-payouts
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: "userId"
+          AttributeType: S
+        - AttributeName: "date"
+          AttributeType: S
+      KeySchema:
+        - AttributeName: "userId"
+          KeyType: HASH
+        - AttributeName: "date"
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+      GlobalSecondaryIndexes:
+        - IndexName: dateIndex
+          KeySchema:
+            - AttributeName: date
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  DynamoDBReportsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: ${self:provider.stage}-app-reports
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: "userId"
+          AttributeType: S
+        # dateMedationId is an overloaded index
+        # dateMedationId = date#network#id, with date = YYYYMMDD
+        # So for example:
+        # userId|dateMedationId
+        # A     |20201120#ironSource#appId1
+        # A     |20201121#ironSource#appId1
+        # A     |20201120#AdMob#adUnit1
+
+        # Examples:
+        # Get all reporting some month (to date): query userId={userId} AND begins_width(dateMedationId, '202011')
+        # Get all reporting of some day: query userId={userId} AND begins_width(dateMedationId, '20201120')
+        # Get AdMob reporting information of some day: query userId={userId} AND begins_width(dateMedationId, '20201120#AdMob')
+        # Get AdMob reporting information of a particular AdMob ad unit: query userId={userId} AND begins_width(dateMedationId, '20201120#AdMob#adUnit1')
+        - AttributeName: "dateMedationId"
+          AttributeType: S
+      KeySchema:
+        - AttributeName: "userId"
+          KeyType: HASH
+        - AttributeName: "dateMedationId"
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: kin-ads-${self:provider.stage}
+      AutoVerifiedAttributes: [email]
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+        InviteMessageTemplate:
+          EmailSubject: "Kin Ad Network Dashboard"
+          EmailMessage: |-
+            Hello, <br /><br />
+            Welcome to Kin Ads! We have created credentials for you to log in to our dashboard. Here, you will be
+            able to see earnings and various other statistics, as well as manage your app's settings.
+            <br /><br />
+            You credentials are:<br />
+            Username: {username}<br />
+            Password: {####}<br /><br  />
+
+            And you can log in here: <a href="${self:custom.${self:provider.stage}.url}" target="_blank">${self:custom.${self:provider.stage}.url}</a>
+            <br /><br />
+            Kind regards,<br />
+            The KinAds Team
+      LambdaConfig:
+        PreSignUp: { "Fn::GetAtt": ["PreSignupLambdaFunction", "Arn"] }
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: False
+          RequireUppercase: False
+          RequireNumbers: False
+          RequireSymbols: False
+      Schema:
+        - { Name: email, Required: true }
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: kin-ads-${self:provider.stage}
+      GenerateSecret: False
+      UserPoolId: { "Ref": "UserPool" }
+
+  UserPoolLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: { "Fn::GetAtt": ["PreSignupLambdaFunction", "Arn"] }
+      Principal: "cognito-idp.amazonaws.com"
+      SourceArn: { "Fn::GetAtt": ["UserPool", "Arn"] }
+
+  IdentityPool:
+    Type: AWS::Cognito::IdentityPool
+    Properties:
+      IdentityPoolName: kinads${self:provider.stage}
+      AllowUnauthenticatedIdentities: False
+      CognitoIdentityProviders:
+        - ClientId: { "Ref": "UserPoolClient" }
+          ProviderName: {
+            "Fn::Join": ["/", ["cognito-idp.${self:provider.region}.amazonaws.com", { "Ref": "UserPool" } ]]
+          }
+
+  AdminGroupIdentityRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Federated: cognito-identity.amazonaws.com }
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                "cognito-identity.amazonaws.com:aud": { "Ref": "IdentityPool" }
+              "ForAnyValue:StringLike":
+                "cognito-identity.amazonaws.com:amr": "authenticated"
+      Policies:
+        - PolicyName: AdminIdentityPolicy-${self:provider.stage}
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cognito-idp:ListUsers
+                  - cognito-idp:AdminCreateUser
+                  - cognito-idp:AdminAddUserToGroup
+                  - cognito-idp:AdminDeleteUser
+                Resource: { "Fn::GetAtt": ["UserPool", "Arn"] }
+              - Effect: Allow
+                Action:
+                  - 'mobileanalytics:PutEvents'
+                  - 'cognito-sync:*'
+                  - 'cognito-identity:*'
+                Resource: '*'
+
+  UserGroupIdentityRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Federated: cognito-identity.amazonaws.com }
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                "cognito-identity.amazonaws.com:aud": { "Ref": "IdentityPool" }
+              "ForAnyValue:StringLike":
+                "cognito-identity.amazonaws.com:amr": "authenticated"
+
+  UserPoolAdminGroup:
+    Type: "AWS::Cognito::UserPoolGroup"
+    Properties:
+      GroupName: AdminGroup
+      Precedence: 1
+      RoleArn:  { "Fn::GetAtt": ["AdminGroupIdentityRole", "Arn"] }
+      UserPoolId: { "Ref": "UserPool" }
+
+  UserPoolUserGroup:
+    Type: "AWS::Cognito::UserPoolGroup"
+    Properties:
+      GroupName: UserGroup
+      Precedence: 1
+      RoleArn:  { "Fn::GetAtt": ["UserGroupIdentityRole", "Arn"] }
+      UserPoolId: { "Ref": "UserPool" }
