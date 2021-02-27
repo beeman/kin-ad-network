@@ -47,7 +47,7 @@
     "googleapis": "^52.1.0",
     "moment": "^2.24.0",
     "moment-es6": "^1.0.0",
-    "node-fetch": "^2.6.0",
+    "node-fetch": "^2.6.1",
     "tslib": "^2.0.1"
   },
   "scripts": {
